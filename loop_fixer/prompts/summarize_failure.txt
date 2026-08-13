@@ -1,0 +1,7 @@
+Summarize, in one or two sentences, why this pytest run failed. Focus on the
+root cause, not a restatement of the traceback.
+
+=== TEST OUTPUT ===
+{test_output}
+
+Respond with only the summary text, no preamble.

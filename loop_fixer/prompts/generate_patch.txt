@@ -1,0 +1,21 @@
+You are fixing a failing pytest test by editing the SOURCE code, not the test.
+
+The test file below is READ-ONLY context — you may not modify it. Your job is
+to change the source file(s) shown so that the unmodified test passes.
+
+=== FAILING TEST ({test_path}) ===
+{test_source}
+
+=== SOURCE FILE(S) YOU MAY EDIT ===
+{source_files}
+
+=== LATEST TEST OUTPUT ===
+{test_output}
+
+=== PRIOR ATTEMPTS THIS RUN ===
+{attempt_history}
+
+Respond with ONLY a unified diff (--- a/path, +++ b/path, @@ hunks) that
+edits one or more of the source files listed above. No prose, no markdown
+fences, no explanation — just the raw diff. Keep hunks small and use minimal
+context lines. Do not touch the test file or any file not listed above.
