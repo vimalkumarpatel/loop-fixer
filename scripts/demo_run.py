@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from loop_fixer import git_checkpoint
 from loop_fixer.adapters.python_pytest import PythonPytestAdapter
-from loop_fixer.fsm import LoopState, run_loop
+from loop_fixer.fsm import build_initial_state, run_loop
 from loop_fixer.llm_client import FakeLLMClient
 from loop_fixer.test_runner import run_pytest
 
@@ -43,8 +43,7 @@ def main() -> int:
     initial_state = build_initial_state(
         repo_root=str(repo_root),
         target_test=target,
-        llm_client=llm_client,
-        adapter=adapter,
+        language="python",
         max_iterations=5,
         no_progress_window=3,
         baseline_commit=baseline_sha,
