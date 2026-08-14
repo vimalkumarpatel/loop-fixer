@@ -53,6 +53,14 @@ Note: `tests/fixtures` is excluded from normal pytest collection via `[tool.pyte
 
 The same demo pattern exists for Java via `scripts/demo_run_java.py` and `tests/fixtures/broken_repo_java/` (requires `mvn` on `PATH`; `tests/test_e2e_demo_java.py` skips automatically when it's absent).
 
+Run the MCP server (for Claude Code / other MCP-capable harnesses; still requires `ANTHROPIC_API_KEY` — see "MCP server" in README.md for why it doesn't delegate to the harness's own model yet):
+```bash
+.venv/bin/pip install -e ".[mcp]"   # requires Python >=3.10, unlike the rest of the package
+export ANTHROPIC_API_KEY=sk-...
+loop-fixer-mcp
+```
+`tests/test_mcp_server.py` is skipped automatically (`pytest.importorskip("mcp")`) when the `[mcp]` extra isn't installed, so the base `pytest tests/ -v` run stays green on Python 3.9 without it.
+
 ## Architecture
 
 ### Five graph nodes, one loop (`loop_fixer/fsm.py`, LangGraph-orchestrated)
@@ -93,6 +101,7 @@ All language-specific mechanics live behind the `LanguageAdapter` Protocol (`ada
 - `llm_client.py` — `LLMClient` Protocol + `LangChainAnthropicClient` (real, wraps `langchain_anthropic.ChatAnthropic`) + `FakeLLMClient` (scripted, used by tests/demo — no network). The Protocol's `generate(prompt, *, max_tokens=2048) -> str` shape didn't change, so `FakeLLMClient` and every call site needed zero edits.
 - `context.py` — `truncate_output`/`normalize_failure_text`, the shared helpers both adapters' `compute_signature` call. Language-specific "last meaningful line" extraction lives in each adapter module, not here.
 - `cli.py` — argparse entrypoint; `--language {python,java}` selects the adapter; runs a baseline test pass before spending any LLM call (0 = already passing, anything else = proceed), then drives `run_loop()`.
+- `mcp_server.py` — optional MCP tool front door (`fix_test`), gated behind the `[mcp]` extra (Python >=3.10). Mirrors `cli.py`'s argument surface and sequence exactly (imports `cli.ADAPTERS` directly rather than duplicating it), swapping only the event sink (`ctx.info(...)` MCP notifications instead of `print()`) and running `run_loop()` off the server's event loop via `anyio.to_thread.run_sync` + a `BlockingPortal` to bridge `on_event` callbacks back onto the async session. Still constructs `LangChainAnthropicClient` — see "MCP server" in README.md for why it doesn't use MCP sampling to delegate to the harness's own model.
 - `adapters/` — see "Language adapters" above.
 - `prompts/` — patch-generation and failure-summary prompt templates (`.txt`, packaged via `[tool.setuptools.package-data]`); language-neutral wording, shared by both adapters.
 
@@ -125,3 +134,7 @@ scripts/demo_run.py               # live Python demo using FakeLLMClient, no API
 scripts/demo_run_java.py          # live Java demo using FakeLLMClient, requires mvn on PATH
 docs/plans/                       # planning docs from the design/build session
 ```
+
+## Two local venvs
+
+Because the optional `[mcp]` extra requires Python >=3.10 while the rest of the package supports >=3.9, this repo's dev setup has (or may have) two venvs: `.venv` (whatever Python you set up with, per "Setup" above — used for the CLI path and the base test suite) and `.venv-mcp` (Python 3.10+, e.g. via `python3.11 -m venv .venv-mcp && .venv-mcp/bin/pip install -e ".[mcp]"` — needed to actually run `tests/test_mcp_server.py` or `loop-fixer-mcp`). Don't assume a single venv covers both paths.

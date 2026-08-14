@@ -10,8 +10,12 @@ dependencies = [
     "langchain-core>=0.3",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.6,<2.0", "anyio>=4.0"]
+
 [project.scripts]
 loop-fixer = "loop_fixer.cli:main"
+loop-fixer-mcp = "loop_fixer.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

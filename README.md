@@ -43,6 +43,40 @@ expects, no invented syntax) for `java`. The Java path requires `mvn` on
 `PATH`; if it's missing, the CLI fails fast with a clear error before
 spending any LLM call.
 
+## MCP server (for Claude Code and other MCP-capable harnesses)
+
+Any harness that can shell out already works today via the CLI above. For
+harnesses that speak [MCP](https://modelcontextprotocol.io), loop_fixer also
+ships an MCP server exposing a single tool, `fix_test`, so the harness gets
+structured tool discovery plus live PLAN/EDIT/TEST/ANALYZE/DECIDE progress as
+`notifications/message` events, instead of just a final exit code.
+
+```bash
+.venv/bin/pip install -e ".[mcp]"   # requires Python 3.10+ — see note below
+export ANTHROPIC_API_KEY=sk-...
+claude mcp add loop-fixer-mcp -- loop-fixer-mcp
+```
+
+This is a transport/visibility upgrade over the CLI, **not** a change in LLM
+sourcing: `fix_test` still uses loop_fixer's own `LangChainAnthropicClient` +
+`ANTHROPIC_API_KEY`, exactly like the CLI. MCP's `sampling` mechanism — which
+would let the connected harness's own model generate patches, avoiding a
+second API key — is not used: Claude Code doesn't implement it as a client
+([tracked upstream](https://github.com/anthropics/claude-code/issues/1785)),
+and the MCP spec deprecated sampling as of its `2026-07-28` revision in favor
+of a multi-round-trip mechanism that doesn't fit loop_fixer's synchronous
+`run_loop()`. This may be revisited once client-side support exists.
+
+**Python version note**: the `mcp` SDK requires Python ≥3.10, while the rest
+of loop_fixer (including the CLI) supports ≥3.9. If your default environment
+is older, create a separate venv for the MCP path, e.g.
+`python3.11 -m venv .venv-mcp && .venv-mcp/bin/pip install -e ".[mcp]"`, and
+point your harness's MCP config at that venv's `loop-fixer-mcp` script.
+
+Every bounded-authority guarantee below applies identically to this path —
+it's the same `run_loop()`/`patch_apply.py`/adapters underneath, just with a
+different `LLMClient` construction site and event sink (`loop_fixer/mcp_server.py`).
+
 ## Verify it manually (no API key needed)
 
 `scripts/demo_run.py` runs the real production pipeline — the same
@@ -343,6 +377,7 @@ loop_fixer/
 │   ├── base.py                # LanguageAdapter Protocol
 │   ├── python_pytest.py       # PythonPytestAdapter (pytest node-ids, ast import resolution)
 │   └── java_maven.py          # JavaMavenAdapter (Surefire specs, convention+import resolution)
+├── mcp_server.py              # MCP tool front door (`fix_test`), optional `[mcp]` extra
 └── prompts/                   # patch-generation / failure-summary prompt templates
 
 tests/                          # unit + hermetic/live end-to-end tests
