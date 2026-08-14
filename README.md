@@ -17,8 +17,10 @@ disposable git branch; any failure path ends in a hard rollback to baseline.
 
 ## Run it
 
+Requires Python 3.13+.
+
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e .
+python3.13 -m venv .venv && .venv/bin/pip install -e .
 export ANTHROPIC_API_KEY=sk-...
 .venv/bin/python -m loop_fixer --test path/to/test_file.py::test_name --repo /path/to/target/repo
 ```
@@ -52,7 +54,7 @@ structured tool discovery plus live PLAN/EDIT/TEST/ANALYZE/DECIDE progress as
 `notifications/message` events, instead of just a final exit code.
 
 ```bash
-.venv/bin/pip install -e ".[mcp]"   # requires Python 3.10+ — see note below
+.venv/bin/pip install -e ".[mcp]"
 export ANTHROPIC_API_KEY=sk-...
 claude mcp add loop-fixer-mcp -- loop-fixer-mcp
 ```
@@ -66,12 +68,6 @@ second API key — is not used: Claude Code doesn't implement it as a client
 and the MCP spec deprecated sampling as of its `2026-07-28` revision in favor
 of a multi-round-trip mechanism that doesn't fit loop_fixer's synchronous
 `run_loop()`. This may be revisited once client-side support exists.
-
-**Python version note**: the `mcp` SDK requires Python ≥3.10, while the rest
-of loop_fixer (including the CLI) supports ≥3.9. If your default environment
-is older, create a separate venv for the MCP path, e.g.
-`python3.11 -m venv .venv-mcp && .venv-mcp/bin/pip install -e ".[mcp]"`, and
-point your harness's MCP config at that venv's `loop-fixer-mcp` script.
 
 Every bounded-authority guarantee below applies identically to this path —
 it's the same `run_loop()`/`patch_apply.py`/adapters underneath, just with a

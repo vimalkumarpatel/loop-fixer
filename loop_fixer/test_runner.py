@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -26,9 +27,16 @@ def run_pytest(repo_root: Path, target: str, timeout: float = 60.0) -> TestResul
     This is the only subprocess call site reachable from the loop. The argv is
     built entirely from code-controlled values (repo_root, target, timeout) —
     no LLM output is ever concatenated into a command line.
+
+    PYTHONDONTWRITEBYTECODE=1 is set so this never leaves a __pycache__/ behind
+    in the target repo — some interpreters (e.g. Homebrew/python.org builds,
+    unlike Apple's system Python which redirects bytecode caches elsewhere)
+    would otherwise dirty the working tree and trip git_checkpoint.preflight()'s
+    clean-tree check before the loop even starts.
     """
     start = time.monotonic()
     argv = [sys.executable, "-m", "pytest", target, "-x", "--tb=short", "-q"]
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         proc = subprocess.run(
             argv,
@@ -36,6 +44,7 @@ def run_pytest(repo_root: Path, target: str, timeout: float = 60.0) -> TestResul
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
         duration = time.monotonic() - start
         return TestResult(

@@ -2,12 +2,12 @@
 name = "loop_fixer"
 version = "0.1.0"
 description = "Deterministic FSM agent loop that fixes a failing pytest test."
-requires-python = ">=3.9"
+requires-python = ">=3.13"
 dependencies = [
     "pytest>=7.0",
-    "langgraph>=0.2",
-    "langchain-anthropic>=0.3",
-    "langchain-core>=0.3",
+    "langgraph>=0.2,<0.7",
+    "langchain-anthropic>=0.3,<0.4",
+    "langchain-core>=0.3,<0.4",
 ]
 
 [project.optional-dependencies]
