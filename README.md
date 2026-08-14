@@ -134,11 +134,13 @@ class LanguageAdapter(Protocol):
     def compute_signature(self, result) -> str: ...
 ```
 
-`LoopState.adapter` carries the chosen implementation, and PLAN/EDIT/TEST/
-ANALYZE call through it instead of hardcoding pytest — `DECIDE` (stop
-conditions, git checkpointing) is untouched, because it was already
-language-neutral. `TestResult` (`test_runner.py`) is the shared,
-language-neutral return type both adapters produce.
+The chosen implementation is passed to `run_loop(..., adapter=...)` and
+threaded through `config["configurable"]["adapter"]` inside the LangGraph
+orchestration (see "Architecture" below); `plan`/`edit`/`test`/`analyze`
+call through it instead of hardcoding pytest — `decide` (stop conditions,
+git checkpointing) is untouched, because it was already language-neutral.
+`TestResult` (`test_runner.py`) is the shared, language-neutral return type
+both adapters produce.
 
 - **`PythonPytestAdapter`** (`adapters/python_pytest.py`) — the original
   behavior, unchanged: parses pytest's `file::test` node-id, statically
@@ -177,25 +179,49 @@ loop:
 | **Deterministic FSM — chosen** | Code owns all control flow and stop conditions; LLM is called only as a tool for two narrow sub-tasks. | Verification becomes objective — success is the test runner's exit code, never an LLM's self-report. Easiest to harden with guardrails. |
 | Search (best-of-N) | Generate N candidate patches per step, run each in isolation, keep the best. | Highest ceiling on hard bugs, but needs sandboxed parallel execution and N× cost — a v2 upgrade once the FSM backbone is proven. |
 
-## How it runs: five states, one loop
+## How it runs: five graph nodes, one loop
+
+Orchestration is a compiled [LangGraph](https://langchain-ai.github.io/langgraph/)
+`StateGraph` (`loop_fixer/fsm.py`), not a hand-rolled `while` loop:
 
 ```mermaid
 flowchart LR
     PLAN --> EDIT --> TEST --> ANALYZE --> DECIDE
     DECIDE -- "continue" --> EDIT
-    DECIDE -- "success or bound hit" --> TERMINATE
+    DECIDE -- "success or bound hit" --> END
 ```
 
-- **PLAN** resolves which files are writable (statically, via the active `LanguageAdapter`).
-- **EDIT** calls the LLM for a patch and applies it via `patch_apply.py`.
-- **TEST** is the *only* state that runs the test — through `state.adapter.run_test`.
-- **ANALYZE** computes a deterministic failure signature — through `state.adapter.compute_signature`.
-- **DECIDE** owns every stop-condition check and all git checkpointing.
+State is a `GraphState` `TypedDict` holding only checkpoint-safe primitives —
+`repo_root`, `target_test`, `language`, the iteration bounds, `iteration`,
+`attempts: list[dict]`, `status`, and so on. Each node has the signature
+`node(state, config) -> dict` and returns a dict of updates that LangGraph
+merges into state — nodes never mutate `state` in place. The non-serializable
+runtime dependencies — the `LLMClient` instance, the `LanguageAdapter`
+instance, and an optional `on_event` observability callback — are **not**
+part of state; they're passed via `config["configurable"]` at invoke time
+and read inside each node (e.g. `config["configurable"]["adapter"]`). This
+keeps the graph's `InMemorySaver` checkpointer meaningful (nothing
+unpicklable riding in state) and is what makes `compiled.invoke(state,
+config=config)` — wrapped by the public `run_loop(initial_state, *,
+llm_client, adapter, on_event=None, thread_id=None) -> dict` entrypoint —
+drive the whole loop.
 
-Each state does exactly one job, and only `TEST` is allowed to run the test
-runner and only `DECIDE` is allowed to check stop conditions or touch git —
+- **plan** resolves which files are writable (statically, via the active `LanguageAdapter`).
+- **edit** calls the LLM for a patch and applies it via `patch_apply.py`.
+- **test** is the *only* node that runs the test — through `adapter.run_test`.
+- **analyze** computes a deterministic failure signature — through `adapter.compute_signature`.
+- **decide** owns every stop-condition check and all git checkpointing; its conditional
+  edge (`"continue"` → `edit`, `"terminate"` → `END`) is the graph's only branch.
+
+Each node does exactly one job, and only `test` is allowed to run the test
+runner and only `decide` is allowed to check stop conditions or touch git —
 that separation is what makes the two guarantees below possible, identically
-for every language adapter.
+for every language adapter. An LLM/network failure in `edit` sets
+`status="failed_error"` without recording an attempt; the downstream nodes
+detect that and short-circuit as no-ops, so the loop still ends immediately
+with no rollback and no iteration counted — matching the pre-migration
+behavior exactly, just implemented as an explicit status check instead of
+an early `while`-loop exit.
 
 ## The key guarantee: a verification signal the agent can't fake
 
@@ -287,15 +313,30 @@ how a real Maven project's repo would already be configured.
 behavior) plus 10 new hermetic `JavaMavenAdapter` unit tests plus 3 new
 live-`mvn` Java end-to-end tests, all run together with `mvn` on `PATH`.
 
+### Orchestration migration to LangGraph
+
+The orchestration layer (`loop_fixer/fsm.py`) was later rewritten around a
+compiled LangGraph `StateGraph` — the hand-rolled `LoopState`/`Attempt`
+dataclasses and `while`-loop dispatch table became a `GraphState` `TypedDict`
+plus five graph nodes (see "How it runs" above). This was a pure
+orchestration swap: `patch_apply.py`'s protected-path enforcement,
+`git_checkpoint.py`'s checkpoint/rollback, and the adapters' fresh-subprocess
+verification were not touched, and the same three guarantee-proving
+scenarios were re-run against the rewritten graph for both languages —
+converges to a passing test, rejects an LLM diff targeting the test file
+(rolls back cleanly after the no-progress window), and hits `--max-iters`
+with exit code `2` and `Reached Maximum Allowed Loops` on stderr — all
+unchanged in outcome. Full suite: `34 passed`.
+
 ## Repo layout
 
 ```
 loop_fixer/
-├── fsm.py                    # LoopState/Attempt + the five FSM states + run_loop()
+├── fsm.py                    # GraphState + the five graph nodes + StateGraph wiring + run_loop()
 ├── patch_apply.py            # unified-diff parsing & application, all the safety guards
 ├── test_runner.py            # TestResult + subprocess wrapper around pytest
 ├── git_checkpoint.py         # preflight, branch/commit-per-attempt, rollback
-├── llm_client.py             # LLMClient Protocol + AnthropicLLMClient + FakeLLMClient
+├── llm_client.py             # LLMClient Protocol + LangChainAnthropicClient + FakeLLMClient
 ├── context.py                # output truncation + shared failure-text normalization
 ├── cli.py                    # argparse entrypoint; --language flag, adapter selection
 ├── adapters/
