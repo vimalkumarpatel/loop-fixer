@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from loop_fixer.adapters.python_pytest import PythonPytestAdapter
 from loop_fixer.fsm import LoopState, run_loop
 from loop_fixer.llm_client import FakeLLMClient
 
@@ -52,6 +53,7 @@ def test_loop_converges_to_passing_test(tmp_path):
         repo_root=repo,
         target_test="test_calc.py::test_add",
         llm_client=fake_llm,
+        adapter=PythonPytestAdapter(),
         max_iterations=5,
         no_progress_window=3,
         baseline_commit=baseline,
@@ -82,6 +84,7 @@ def test_loop_stops_on_no_progress_when_unfixable(tmp_path):
         repo_root=repo,
         target_test="test_calc.py::test_add",
         llm_client=fake_llm,
+        adapter=PythonPytestAdapter(),
         max_iterations=10,
         no_progress_window=3,
         baseline_commit=baseline,
@@ -120,6 +123,7 @@ def test_loop_rejects_llm_attempt_to_edit_test_file(tmp_path):
         repo_root=repo,
         target_test="test_calc.py::test_add",
         llm_client=fake_llm,
+        adapter=PythonPytestAdapter(),
         max_iterations=10,
         no_progress_window=3,
         baseline_commit=baseline,

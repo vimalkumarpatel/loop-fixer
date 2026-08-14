@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import ast
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
 from . import context, git_checkpoint, patch_apply
+from .adapters.base import LanguageAdapter
 from .errors import GitCheckpointError, LLMError, PatchApplyError
 from .llm_client import LLMClient
-from .test_runner import TestResult, run_pytest
+from .test_runner import TestResult
 
 Status = Literal[
     "running",
@@ -36,6 +36,7 @@ class LoopState:
     repo_root: Path
     target_test: str
     llm_client: LLMClient
+    adapter: LanguageAdapter
     max_iterations: int = 5
     max_wall_seconds: float = 300.0
     no_progress_window: int = 3
@@ -62,39 +63,10 @@ class LoopState:
             self.on_event(line)
 
 
-def _target_to_path(repo_root: Path, target_test: str) -> Path:
-    file_part = target_test.split("::", 1)[0]
-    return (repo_root / file_part).resolve()
-
-
-def _resolve_import_files(repo_root: Path, test_file: Path) -> set[str]:
-    """Statically resolve local (same-repo) modules imported by the test file.
-
-    This is the only mechanism used to populate writable_paths — the test
-    file itself is never included, which is what makes it non-writable.
-    """
-    tree = ast.parse(test_file.read_text())
-    module_names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                module_names.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.module and node.level == 0:
-                module_names.add(node.module.split(".")[0])
-
-    writable: set[str] = set()
-    for name in module_names:
-        candidate = repo_root / f"{name}.py"
-        if candidate.exists():
-            writable.add(str(candidate.relative_to(repo_root)))
-    return writable
-
-
 def state_plan(state: LoopState) -> str:
     if state.test_file is None:
-        state.test_file = _target_to_path(state.repo_root, state.target_test)
-        state.writable_paths = _resolve_import_files(state.repo_root, state.test_file)
+        state.test_file = state.adapter.resolve_test_file(state.repo_root, state.target_test)
+        state.writable_paths = state.adapter.resolve_writable_paths(state.repo_root, state.test_file)
         state.emit(
             f"[iter {state.iteration + 1}] PLAN   resolved writable files: "
             f"{', '.join(sorted(state.writable_paths)) or '(none found)'}"
@@ -165,10 +137,10 @@ def state_edit(state: LoopState) -> str:
 
 def state_test(state: LoopState) -> str:
     n = state.iteration + 1
-    result = run_pytest(state.repo_root, state.target_test, timeout=state.pytest_timeout)
+    result = state.adapter.run_test(state.repo_root, state.target_test, timeout=state.pytest_timeout)
     state.attempts[-1].test_result = result
     outcome = "exit 0 (PASS)" if result.passed else f"exit {result.returncode}"
-    state.emit(f"[iter {n}] TEST   pytest {state.target_test} -> {outcome} ({result.duration:.2f}s)")
+    state.emit(f"[iter {n}] TEST   {state.adapter.name} {state.target_test} -> {outcome} ({result.duration:.2f}s)")
     return "ANALYZE"
 
 
@@ -183,7 +155,7 @@ def state_analyze(state: LoopState) -> str:
         state.emit(f"[iter {n}] ANALYZE  test passed")
         return "DECIDE"
 
-    signature = context.compute_signature(result)
+    signature = state.adapter.compute_signature(result)
     attempt.failure_signature = signature
     state.emit(f"[iter {n}] ANALYZE  signature={signature}")
 

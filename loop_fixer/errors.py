@@ -15,3 +15,7 @@ class GitCheckpointError(LoopFixerError):
 
 class LLMError(LoopFixerError):
     """Raised when the LLM client fails to produce a response."""
+
+
+class AdapterError(LoopFixerError):
+    """Raised when a language adapter's required tooling is missing or misconfigured."""
