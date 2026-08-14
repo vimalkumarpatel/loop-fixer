@@ -1,6 +1,6 @@
 """Live demo: runs the real CLI pipeline (fsm/git/patch_apply/test_runner) against
 the seeded broken_repo fixture, with FakeLLMClient standing in for the network call
-to Anthropic (no ANTHROPIC_API_KEY needed for this demo). Swap in AnthropicLLMClient
+to Anthropic (no ANTHROPIC_API_KEY needed for this demo). Swap in LangChainAnthropicClient
 to use a real model -- see README.
 """
 from __future__ import annotations
@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from loop_fixer import git_checkpoint
-from loop_fixer.fsm import LoopState, run_loop
+from loop_fixer.adapters.python_pytest import PythonPytestAdapter
+from loop_fixer.fsm import build_initial_state, run_loop
 from loop_fixer.llm_client import FakeLLMClient
 from loop_fixer.test_runner import run_pytest
 
@@ -37,21 +38,21 @@ def main() -> int:
     print(f"[preflight] branch={branch} baseline={baseline_sha[:8]}")
 
     llm_client = FakeLLMClient(responses=[FIXING_DIFF])
+    adapter = PythonPytestAdapter()
 
-    state = LoopState(
-        repo_root=repo_root,
+    initial_state = build_initial_state(
+        repo_root=str(repo_root),
         target_test=target,
-        llm_client=llm_client,
+        language="python",
         max_iterations=5,
         no_progress_window=3,
         baseline_commit=baseline_sha,
         last_known_good_commit=baseline_sha,
-        on_event=print,
     )
-    state = run_loop(state)
+    result = run_loop(initial_state, llm_client=llm_client, adapter=adapter, on_event=print)
 
-    print(f"\n[result] status={state.status} iterations={state.iteration} branch={branch}")
-    return 0 if state.status == "success" else 1
+    print(f"\n[result] status={result['status']} iterations={result['iteration']} branch={branch}")
+    return 0 if result["status"] == "success" else 1
 
 
 if __name__ == "__main__":

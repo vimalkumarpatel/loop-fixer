@@ -33,7 +33,7 @@ def _seed_repo(tmp_path: Path) -> Path:
 def test_max_iters_exits_2_with_exact_message(tmp_path, monkeypatch, capsys):
     repo = _seed_repo(tmp_path)
 
-    monkeypatch.setattr(cli, "AnthropicLLMClient", lambda model: FakeLLMClient(responses=[USELESS_DIFF] * 10))
+    monkeypatch.setattr(cli, "LangChainAnthropicClient", lambda model: FakeLLMClient(responses=[USELESS_DIFF] * 10))
 
     exit_code = cli.main(
         [

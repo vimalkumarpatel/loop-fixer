@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from loop_fixer.adapters.java_maven import JavaMavenAdapter
-from loop_fixer.fsm import LoopState, run_loop
+from loop_fixer.fsm import build_initial_state, run_loop
 from loop_fixer.llm_client import FakeLLMClient
 
 pytestmark = pytest.mark.skipif(shutil.which("mvn") is None, reason="mvn not found on PATH")
@@ -67,22 +67,20 @@ def test_loop_converges_to_passing_test(tmp_path):
 
     fake_llm = FakeLLMClient(responses=[FIXING_DIFF])
     events = []
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test=TARGET,
-        llm_client=fake_llm,
-        adapter=JavaMavenAdapter(),
+        language="java",
         max_iterations=5,
         no_progress_window=3,
-        pytest_timeout=120.0,
+        test_timeout=120.0,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
-        on_event=events.append,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=JavaMavenAdapter(), on_event=events.append)
 
-    assert result.status == "success"
+    assert result["status"] == "success"
     assert "return a + b;" in (repo / "src/main/java/com/example/Calc.java").read_text()
     # The unmodified test file's assertion is what actually passed.
     proc = subprocess.run(
@@ -102,21 +100,20 @@ def test_loop_stops_on_no_progress_when_unfixable(tmp_path):
     branch, baseline = preflight(repo, TARGET)
 
     fake_llm = FakeLLMClient(responses=[USELESS_DIFF] * 5)
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test=TARGET,
-        llm_client=fake_llm,
-        adapter=JavaMavenAdapter(),
+        language="java",
         max_iterations=10,
         no_progress_window=3,
-        pytest_timeout=120.0,
+        test_timeout=120.0,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=JavaMavenAdapter())
 
-    assert result.status == "failed_no_progress"
+    assert result["status"] == "failed_no_progress"
     # Working tree must be rolled back to baseline (still broken, but clean).
     original = (FIXTURE_DIR / "src/main/java/com/example/Calc.java").read_text()
     assert (repo / "src/main/java/com/example/Calc.java").read_text() == original
@@ -151,24 +148,23 @@ def test_loop_rejects_llm_attempt_to_edit_test_file(tmp_path):
  }
 """
     fake_llm = FakeLLMClient(responses=[cheat_diff] * 5)
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test=TARGET,
-        llm_client=fake_llm,
-        adapter=JavaMavenAdapter(),
+        language="java",
         max_iterations=10,
         no_progress_window=3,
-        pytest_timeout=120.0,
+        test_timeout=120.0,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=JavaMavenAdapter())
 
-    assert result.status == "failed_no_progress"
+    assert result["status"] == "failed_no_progress"
     original_test_source = (FIXTURE_DIR / "src/test/java/com/example/CalcTest.java").read_text()
     assert (repo / "src/test/java/com/example/CalcTest.java").read_text() == original_test_source
     assert all(
-        a.failure_signature and a.failure_signature.startswith("PATCH_APPLY_ERROR")
-        for a in result.attempts
+        a["failure_signature"] and a["failure_signature"].startswith("PATCH_APPLY_ERROR")
+        for a in result["attempts"]
     )

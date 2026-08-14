@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from loop_fixer.adapters.python_pytest import PythonPytestAdapter
-from loop_fixer.fsm import LoopState, run_loop
+from loop_fixer.fsm import build_initial_state, run_loop
 from loop_fixer.llm_client import FakeLLMClient
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "broken_repo"
@@ -49,21 +49,19 @@ def test_loop_converges_to_passing_test(tmp_path):
 
     fake_llm = FakeLLMClient(responses=[FIXING_DIFF])
     events = []
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test="test_calc.py::test_add",
-        llm_client=fake_llm,
-        adapter=PythonPytestAdapter(),
+        language="python",
         max_iterations=5,
         no_progress_window=3,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
-        on_event=events.append,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=PythonPytestAdapter(), on_event=events.append)
 
-    assert result.status == "success"
+    assert result["status"] == "success"
     assert "return a + b" in (repo / "calc.py").read_text()
     # The unmodified test file's assertion is what actually passed.
     proc = subprocess.run(
@@ -80,20 +78,19 @@ def test_loop_stops_on_no_progress_when_unfixable(tmp_path):
     branch, baseline = preflight(repo, "test_calc.py::test_add")
 
     fake_llm = FakeLLMClient(responses=[USELESS_DIFF] * 5)
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test="test_calc.py::test_add",
-        llm_client=fake_llm,
-        adapter=PythonPytestAdapter(),
+        language="python",
         max_iterations=10,
         no_progress_window=3,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=PythonPytestAdapter())
 
-    assert result.status == "failed_no_progress"
+    assert result["status"] == "failed_no_progress"
     # Working tree must be rolled back to baseline (still broken, but clean).
     assert (repo / "calc.py").read_text() == "def add(a, b):\n    return a - b\n"
     status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True)
@@ -119,23 +116,22 @@ def test_loop_rejects_llm_attempt_to_edit_test_file(tmp_path):
 +    assert True
 """
     fake_llm = FakeLLMClient(responses=[cheat_diff] * 5)
-    state = LoopState(
-        repo_root=repo,
+    initial_state = build_initial_state(
+        repo_root=str(repo),
         target_test="test_calc.py::test_add",
-        llm_client=fake_llm,
-        adapter=PythonPytestAdapter(),
+        language="python",
         max_iterations=10,
         no_progress_window=3,
         baseline_commit=baseline,
         last_known_good_commit=baseline,
     )
 
-    result = run_loop(state)
+    result = run_loop(initial_state, llm_client=fake_llm, adapter=PythonPytestAdapter())
 
-    assert result.status == "failed_no_progress"
+    assert result["status"] == "failed_no_progress"
     original_test_source = (FIXTURE_DIR / "test_calc.py").read_text()
     assert (repo / "test_calc.py").read_text() == original_test_source
     assert all(
-        a.failure_signature and a.failure_signature.startswith("PATCH_APPLY_ERROR")
-        for a in result.attempts
+        a["failure_signature"] and a["failure_signature"].startswith("PATCH_APPLY_ERROR")
+        for a in result["attempts"]
     )

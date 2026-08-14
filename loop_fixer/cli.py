@@ -8,8 +8,8 @@ from . import git_checkpoint
 from .adapters import JavaMavenAdapter, PythonPytestAdapter
 from .adapters.base import LanguageAdapter
 from .errors import AdapterError, GitCheckpointError, LLMError
-from .fsm import LoopState, run_loop
-from .llm_client import AnthropicLLMClient
+from .fsm import build_initial_state, run_loop
+from .llm_client import LangChainAnthropicClient
 
 EXIT_CODES = {
     "success": 0,
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[preflight] branch={branch} baseline={baseline_sha[:8]}")
 
     try:
-        llm_client = AnthropicLLMClient(model=args.model)
+        llm_client = LangChainAnthropicClient(model=args.model)
     except LLMError as exc:
         print(f"[preflight] {exc}")
         return EXIT_CODES["failed_error"]
@@ -85,35 +85,33 @@ def main(argv: list[str] | None = None) -> int:
     def on_event(line: str) -> None:
         print(line)
 
-    state = LoopState(
-        repo_root=repo_root,
+    initial_state = build_initial_state(
+        repo_root=str(repo_root),
         target_test=args.test,
-        llm_client=llm_client,
-        adapter=adapter,
+        language=args.language,
         max_iterations=args.max_iters,
         max_wall_seconds=args.max_seconds,
         no_progress_window=args.no_progress_window,
         max_files_per_patch=args.max_files_per_patch,
-        pytest_timeout=args.pytest_timeout,
+        test_timeout=args.pytest_timeout,
         summarize_failures=args.summarize_failures,
         baseline_commit=baseline_sha,
         last_known_good_commit=baseline_sha,
-        on_event=on_event,
     )
 
-    state = run_loop(state)
+    result = run_loop(initial_state, llm_client=llm_client, adapter=adapter, on_event=on_event)
 
-    print(f"\n[result] status={state.status} iterations={state.iteration} branch={branch}")
-    if state.status == "success":
+    print(f"\n[result] status={result['status']} iterations={result['iteration']} branch={branch}")
+    if result["status"] == "success":
         print(f"[result] fix committed on '{branch}'. Review with: git log {branch}")
     else:
         print(f"[result] rolled back to baseline; attempt history preserved on '{branch}'")
     print(f"[result] to return to your original branch: git checkout <your-branch>")
 
-    if state.status == "failed_max_iter":
+    if result["status"] == "failed_max_iter":
         print("Reached Maximum Allowed Loops", file=sys.stderr)
 
-    return EXIT_CODES.get(state.status, 5)
+    return EXIT_CODES.get(result["status"], 5)
 
 
 if __name__ == "__main__":

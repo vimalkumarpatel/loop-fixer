@@ -55,34 +55,42 @@ The same demo pattern exists for Java via `scripts/demo_run_java.py` and `tests/
 
 ## Architecture
 
-### Five FSM states, one loop (`loop_fixer/fsm.py`)
+### Five graph nodes, one loop (`loop_fixer/fsm.py`, LangGraph-orchestrated)
+
+Orchestration is a compiled LangGraph `StateGraph`, not a hand-rolled `while` loop:
 
 ```
 PLAN --> EDIT --> TEST --> ANALYZE --> DECIDE
 DECIDE -- "continue" --> EDIT
-DECIDE -- "success or bound hit" --> TERMINATE
+DECIDE -- "success or bound hit" --> END
 ```
 
-Each state does exactly one job, and responsibilities are strictly partitioned — this separation is what makes the anti-cheating guarantee possible:
-- **PLAN** resolves which files are writable, statically, via `state.adapter.resolve_test_file`/`resolve_writable_paths`.
-- **EDIT** calls the LLM for a patch and applies it via `patch_apply.py`.
-- **TEST** is the *only* state allowed to run the test runner, via `state.adapter.run_test`.
-- **ANALYZE** computes a deterministic failure signature, via `state.adapter.compute_signature`.
-- **DECIDE** is the *only* state allowed to check stop conditions or touch git (`git_checkpoint.py`) — language-neutral, untouched by the adapter abstraction.
+State is a `GraphState` `TypedDict` of checkpoint-safe primitives only (`repo_root`, `target_test`, `language`, bounds, `iteration`, `attempts: list[dict]`, `status`, etc.) — no `LLMClient`, `LanguageAdapter`, or callback ever rides in state. Each node is `node(state, config) -> dict` and returns a **dict of updates**, which LangGraph merges into state (this is why nodes never mutate `state` in place, unlike the old dataclass version). The non-serializable runtime dependencies — the `LLMClient` instance, the `LanguageAdapter` instance, and the `on_event` observability callback — are passed via `config["configurable"]` at invoke time and read inside each node (`config["configurable"]["adapter"]`, etc.). This keeps the `InMemorySaver` checkpointer meaningful (nothing unpicklable in state) and is what lets `compiled.invoke(state, config=config)` drive the whole loop.
+
+Each node does exactly one job, and responsibilities are strictly partitioned — this separation is what makes the anti-cheating guarantee possible:
+- **plan_node** resolves which files are writable, statically, via `config["configurable"]["adapter"].resolve_test_file`/`resolve_writable_paths`.
+- **edit_node** calls the LLM for a patch and applies it via `patch_apply.py`.
+- **test_node** is the *only* node allowed to run the test runner, via `adapter.run_test`.
+- **analyze_node** computes a deterministic failure signature, via `adapter.compute_signature`.
+- **decide_node** is the *only* node allowed to check stop conditions or touch git (`git_checkpoint.py`) — language-neutral, untouched by the adapter abstraction. The conditional edge out of `decide` (`"continue"` → `edit`, `"terminate"` → `END`) is the only branch in the graph; everything else is a fixed edge.
+
+`run_loop(initial_state: dict, *, llm_client, adapter, on_event=None, thread_id=None) -> dict` is the public entrypoint: it builds the `config["configurable"]` dict, calls `compiled.invoke(...)`, and returns the final state dict (read `result["status"]`, `result["iteration"]`, etc. — same shape callers already expected, just a dict instead of a `LoopState`). `build_initial_state(...)` is the convenience constructor for the initial `GraphState` dict, replacing the old `LoopState(...)` call sites.
+
+An LLM/network failure in `edit_node` (`LLMError`) sets `status="failed_error"` without appending an attempt; `test_node`/`analyze_node`/`decide_node` all check for this and short-circuit as a no-op (matching the original hand-rolled FSM's behavior of ending the loop immediately, with no rollback and no iteration incremented, since the graph's edges are fixed rather than dynamically chosen per node like the old dispatch table was).
 
 ### Language adapters (`loop_fixer/adapters/`)
-All language-specific mechanics live behind the `LanguageAdapter` Protocol (`adapters/base.py`): `resolve_test_file`, `resolve_writable_paths`, `run_test`, `compute_signature`. `LoopState.adapter` carries the concrete instance; `fsm.py`'s states call through it instead of hardcoding pytest.
+All language-specific mechanics live behind the `LanguageAdapter` Protocol (`adapters/base.py`): `resolve_test_file`, `resolve_writable_paths`, `run_test`, `compute_signature`. The concrete instance is passed to `run_loop(..., adapter=...)` and threaded through `config["configurable"]["adapter"]`; nodes call through it instead of hardcoding pytest.
 - `python_pytest.py` — `PythonPytestAdapter`: pytest `file::test` node-id parsing, `ast`-based same-repo import resolution, `python -m pytest <target>`, `"E "`-prefix assertion-line extraction. This is the original behavior, relocated verbatim.
 - `java_maven.py` — `JavaMavenAdapter`: Surefire spec parsing (`com.example.FooTest#testBar`), writable-path resolution via directory-convention mirroring (`FooTest`/`TestFoo` → `Foo` under `src/main/java/...`) unioned with regex-parsed `import` statements, `mvn -q -Dtest=<spec> -Dsurefire.failIfNoSpecifiedTests=false test` (raises `AdapterError` if `mvn` isn't on `PATH`), and Surefire-output exception-line extraction.
 - Both adapters exclude the test file from `writable_paths` unconditionally — the same non-negotiable guarantee, enforced independently in each adapter.
 - Adding a language = one new adapter module + a registry entry in `cli.py`'s `ADAPTERS` dict. No changes needed to `fsm.py`, `patch_apply.py`, or `git_checkpoint.py`.
 
 ### Module map (`loop_fixer/`)
-- `fsm.py` — `LoopState`/`Attempt` dataclasses + the five FSM states + `run_loop()`. The orchestration core. `LoopState.adapter: LanguageAdapter` is a required field.
-- `patch_apply.py` — unified-diff parsing and application, plus every safety guard: rejects diff hunks touching paths outside `writable_paths` or containing path traversal, before a byte reaches disk. Language-neutral, unchanged by the adapter abstraction.
+- `fsm.py` — `GraphState` `TypedDict` + the five graph nodes + graph wiring (`StateGraph`/`InMemorySaver`) + `run_loop()`/`build_initial_state()`. The orchestration core, now a compiled LangGraph `StateGraph` instead of a hand-rolled dispatch loop.
+- `patch_apply.py` — unified-diff parsing and application, plus every safety guard: rejects diff hunks touching paths outside `writable_paths` or containing path traversal, before a byte reaches disk. Language-neutral, unchanged by the adapter abstraction or the LangGraph migration.
 - `test_runner.py` — `TestResult` dataclass (the shared, language-neutral return type) + subprocess wrapper around pytest, used by `PythonPytestAdapter.run_test`.
 - `git_checkpoint.py` — preflight checks (clean tree required), branch/commit-per-attempt, rollback on failure. Language-neutral, unchanged.
-- `llm_client.py` — `LLMClient` Protocol + `AnthropicLLMClient` (real) + `FakeLLMClient` (scripted, used by tests/demo — no network).
+- `llm_client.py` — `LLMClient` Protocol + `LangChainAnthropicClient` (real, wraps `langchain_anthropic.ChatAnthropic`) + `FakeLLMClient` (scripted, used by tests/demo — no network). The Protocol's `generate(prompt, *, max_tokens=2048) -> str` shape didn't change, so `FakeLLMClient` and every call site needed zero edits.
 - `context.py` — `truncate_output`/`normalize_failure_text`, the shared helpers both adapters' `compute_signature` call. Language-specific "last meaningful line" extraction lives in each adapter module, not here.
 - `cli.py` — argparse entrypoint; `--language {python,java}` selects the adapter; runs a baseline test pass before spending any LLM call (0 = already passing, anything else = proceed), then drives `run_loop()`.
 - `adapters/` — see "Language adapters" above.
