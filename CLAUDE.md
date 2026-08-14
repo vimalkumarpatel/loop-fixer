@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`loop_fixer` is a deterministic FSM agent loop that takes a failing pytest test and iterates **Plan → Edit → Test → Analyze → Decide** — generating a patch via an LLM, applying it, re-running the test, and deciding whether to continue, stop-success, or stop-fail — until the test passes or a bounded stop condition is hit.
+`loop_fixer` is a deterministic FSM agent loop that takes a failing test and iterates **Plan → Edit → Test → Analyze → Decide** — generating a patch via an LLM, applying it, re-running the test, and deciding whether to continue, stop-success, or stop-fail — until the test passes or a bounded stop condition is hit. It's language-agnostic: a `LanguageAdapter` abstraction (`loop_fixer/adapters/`) supplies the language-specific mechanics, and `python` (pytest) or `java` (Maven) is selected via `--language` (default `python`).
 
-The core design guarantee: **the agent cannot fake success.** The test file, fixtures, and pytest config are hard-excluded from the set of files a patch is allowed to touch (enforced in code, not by prompting), and every verification run is a fresh `pytest` subprocess whose exit code is the only signal that matters.
+The core design guarantee: **the agent cannot fake success.** The test file (and, for Python, fixtures/pytest config) is hard-excluded from the set of files a patch is allowed to touch (enforced in code, not by prompting), and every verification run is a fresh test-runner subprocess (`pytest` or `mvn test`, depending on the adapter) whose exit code is the only signal that matters.
 
 ## Commands
 
@@ -32,6 +32,12 @@ export ANTHROPIC_API_KEY=sk-...
 ```
 The target repo must be a git repo with a clean working tree, or the tool refuses to start.
 
+For Java targets, add `--language java` and use a Maven Surefire spec as `--test` (`com.example.FooTest#testBar` — what `mvn -Dtest=...` already expects):
+```bash
+.venv/bin/python -m loop_fixer --language java --test com.example.FooTest#testBar --repo /path/to/target/repo
+```
+Requires `mvn` on `PATH`; the CLI raises `AdapterError` and exits before any LLM call if it's missing.
+
 Verify the loop manually without an API key, using `scripts/demo_run.py` (runs the real `fsm.py`/`git_checkpoint.py`/`patch_apply.py`/`test_runner.py` pipeline with a scripted `FakeLLMClient`):
 ```bash
 rm -rf /tmp/demo
@@ -45,6 +51,8 @@ Expected output ends with `[result] status=success iterations=1 ...`, preceded b
 
 Note: `tests/fixtures` is excluded from normal pytest collection via `[tool.pytest.ini_options] addopts = "--ignore=tests/fixtures"` in `pyproject.toml` — those files are fixture inputs for the demo/e2e test, not tests to run directly.
 
+The same demo pattern exists for Java via `scripts/demo_run_java.py` and `tests/fixtures/broken_repo_java/` (requires `mvn` on `PATH`; `tests/test_e2e_demo_java.py` skips automatically when it's absent).
+
 ## Architecture
 
 ### Five FSM states, one loop (`loop_fixer/fsm.py`)
@@ -56,26 +64,34 @@ DECIDE -- "success or bound hit" --> TERMINATE
 ```
 
 Each state does exactly one job, and responsibilities are strictly partitioned — this separation is what makes the anti-cheating guarantee possible:
-- **PLAN** resolves which files are writable, statically, from the failing test's imports.
+- **PLAN** resolves which files are writable, statically, via `state.adapter.resolve_test_file`/`resolve_writable_paths`.
 - **EDIT** calls the LLM for a patch and applies it via `patch_apply.py`.
-- **TEST** is the *only* state allowed to run pytest (`test_runner.py`).
-- **ANALYZE** computes a deterministic failure signature (`context.py`).
-- **DECIDE** is the *only* state allowed to check stop conditions or touch git (`git_checkpoint.py`).
+- **TEST** is the *only* state allowed to run the test runner, via `state.adapter.run_test`.
+- **ANALYZE** computes a deterministic failure signature, via `state.adapter.compute_signature`.
+- **DECIDE** is the *only* state allowed to check stop conditions or touch git (`git_checkpoint.py`) — language-neutral, untouched by the adapter abstraction.
+
+### Language adapters (`loop_fixer/adapters/`)
+All language-specific mechanics live behind the `LanguageAdapter` Protocol (`adapters/base.py`): `resolve_test_file`, `resolve_writable_paths`, `run_test`, `compute_signature`. `LoopState.adapter` carries the concrete instance; `fsm.py`'s states call through it instead of hardcoding pytest.
+- `python_pytest.py` — `PythonPytestAdapter`: pytest `file::test` node-id parsing, `ast`-based same-repo import resolution, `python -m pytest <target>`, `"E "`-prefix assertion-line extraction. This is the original behavior, relocated verbatim.
+- `java_maven.py` — `JavaMavenAdapter`: Surefire spec parsing (`com.example.FooTest#testBar`), writable-path resolution via directory-convention mirroring (`FooTest`/`TestFoo` → `Foo` under `src/main/java/...`) unioned with regex-parsed `import` statements, `mvn -q -Dtest=<spec> -Dsurefire.failIfNoSpecifiedTests=false test` (raises `AdapterError` if `mvn` isn't on `PATH`), and Surefire-output exception-line extraction.
+- Both adapters exclude the test file from `writable_paths` unconditionally — the same non-negotiable guarantee, enforced independently in each adapter.
+- Adding a language = one new adapter module + a registry entry in `cli.py`'s `ADAPTERS` dict. No changes needed to `fsm.py`, `patch_apply.py`, or `git_checkpoint.py`.
 
 ### Module map (`loop_fixer/`)
-- `fsm.py` — `LoopState`/`Attempt` dataclasses + the five FSM states + `run_loop()`. The orchestration core.
-- `patch_apply.py` — unified-diff parsing and application, plus every safety guard: rejects diff hunks touching paths outside `writable_paths` or containing path traversal, before a byte reaches disk.
-- `test_runner.py` — subprocess wrapper around pytest; the only place that shells out to run tests. This is the verification signal — an OS exit code, never an LLM's self-report.
-- `git_checkpoint.py` — preflight checks (clean tree required), branch/commit-per-attempt, rollback on failure.
+- `fsm.py` — `LoopState`/`Attempt` dataclasses + the five FSM states + `run_loop()`. The orchestration core. `LoopState.adapter: LanguageAdapter` is a required field.
+- `patch_apply.py` — unified-diff parsing and application, plus every safety guard: rejects diff hunks touching paths outside `writable_paths` or containing path traversal, before a byte reaches disk. Language-neutral, unchanged by the adapter abstraction.
+- `test_runner.py` — `TestResult` dataclass (the shared, language-neutral return type) + subprocess wrapper around pytest, used by `PythonPytestAdapter.run_test`.
+- `git_checkpoint.py` — preflight checks (clean tree required), branch/commit-per-attempt, rollback on failure. Language-neutral, unchanged.
 - `llm_client.py` — `LLMClient` Protocol + `AnthropicLLMClient` (real) + `FakeLLMClient` (scripted, used by tests/demo — no network).
-- `context.py` — output truncation and failure-signature normalization (used by ANALYZE for the no-progress check).
-- `cli.py` — argparse entrypoint; runs a baseline pytest pass before spending any LLM call, then drives `run_loop()`.
-- `prompts/` — patch-generation and failure-summary prompt templates (`.txt`, packaged via `[tool.setuptools.package-data]`).
+- `context.py` — `truncate_output`/`normalize_failure_text`, the shared helpers both adapters' `compute_signature` call. Language-specific "last meaningful line" extraction lives in each adapter module, not here.
+- `cli.py` — argparse entrypoint; `--language {python,java}` selects the adapter; runs a baseline test pass before spending any LLM call (0 = already passing, anything else = proceed), then drives `run_loop()`.
+- `adapters/` — see "Language adapters" above.
+- `prompts/` — patch-generation and failure-summary prompt templates (`.txt`, packaged via `[tool.setuptools.package-data]`); language-neutral wording, shared by both adapters.
 
 ### Bounded authority model
 What the loop can read/write/execute is an explicit allowlist, not a convention — see the README's "Bounded authority" table for the full enforcement mapping. Key points when touching this code:
-- Writes are restricted to `writable_paths`, computed from the target test's static import graph — never the test file, `conftest.py`, or pytest config.
-- The only subprocess call site for running tests is `test_runner.py`, invoked as `python -m pytest <target>` with code-controlled args — LLM output is never placed in a command line.
+- Writes are restricted to `writable_paths`, computed by the active adapter (static import graph for Python; convention + import resolution for Java) — never the test file, and for Python never `conftest.py`/pytest config either.
+- The only subprocess call site for running tests is each adapter's `run_test` (`test_runner.run_pytest` for Python, a fixed `mvn` argv for Java), invoked with code-controlled args — LLM output is never placed in a command line, for either adapter.
 - Every attempt is git-committed on a disposable `loop-fixer/<slug>/<timestamp>` branch; the user's original branch is never checked out or modified. Any terminal failure runs `git reset --hard` back to the pre-loop commit.
 
 ### Stop conditions and exit codes (`cli.py: EXIT_CODES`)
@@ -92,9 +108,12 @@ The README documents four patterns considered before settling on the determinist
 
 ## Repo layout
 ```
-loop_fixer/            # the package (see module map above)
-tests/                 # unit tests + hermetic end-to-end demo test
-tests/fixtures/        # scratch repo fixtures (excluded from normal pytest collection)
-scripts/demo_run.py    # live demo using FakeLLMClient, no API key needed
-docs/plans/            # planning docs from the design/build session
+loop_fixer/                       # the package (see module map above)
+loop_fixer/adapters/              # LanguageAdapter Protocol + python_pytest/java_maven implementations
+tests/                            # unit tests + hermetic/live end-to-end demo tests
+tests/fixtures/                   # scratch repo fixtures (excluded from normal pytest collection)
+tests/fixtures/broken_repo_java/  # Maven demo fixture (needs mvn on PATH for the e2e test)
+scripts/demo_run.py               # live Python demo using FakeLLMClient, no API key needed
+scripts/demo_run_java.py          # live Java demo using FakeLLMClient, requires mvn on PATH
+docs/plans/                       # planning docs from the design/build session
 ```

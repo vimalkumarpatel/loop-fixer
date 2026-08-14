@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from loop_fixer.adapters.python_pytest import PythonPytestAdapter
 from loop_fixer.fsm import Attempt, LoopState, state_decide
 from loop_fixer.test_runner import TestResult
 
@@ -19,6 +20,7 @@ def _state(tmp_path, **overrides):
         repo_root=tmp_path,
         target_test="tests/test_x.py::test_y",
         llm_client=None,
+        adapter=PythonPytestAdapter(),
         max_iterations=5,
         max_wall_seconds=300.0,
         no_progress_window=3,
